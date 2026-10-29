@@ -1,4 +1,5 @@
 import { escapeHTML, icon, pageHeading } from './design.js';
+import { renderPlayerHub } from './player-hub.js';
 // ============================================
 // F1 PREDICTION LEAGUE — DASHBOARD
 // Info cards · Countdown · CTA
@@ -50,6 +51,7 @@ async function renderDashboard() {
     </div>
     <div id="dashboard-cta" class="dashboard-cta"></div>
     <div id="season-overview"></div>
+    <div id="player-hub" aria-live="polite"></div>
   `;
 
   try {
@@ -61,6 +63,10 @@ async function renderDashboard() {
 
     const currentUser = auth.currentUser;
     const currentUserDoc = users.find(u => u.id === currentUser?.uid);
+    const hub = page.querySelector('#player-hub');
+    if (currentUser) {
+      renderPlayerHub(hub, currentUser, currentUserDoc, races);
+    }
 
     // Sort races by round
     races.sort((a, b) => a.round - b.round);

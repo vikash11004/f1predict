@@ -5,6 +5,7 @@
 
 import {
   auth,
+  callRooms,
   isAdmin,
   getDocument,
   setDocument,
@@ -55,6 +56,21 @@ let hasCalculatedResults = false;
 let isEditingExistingResults = false;
 let officialResultOrder = null;
 let userSessionScoreData = null;
+let currentRoomId = null;
+let roomContext = null;
+let builderVersion = 0;
+let builderUid = null;
+let publicationRevision = 0;
+let roomSaveQueue = Promise.resolve();
+function saveRoomPrediction(input) {
+  const uid = builderUid;
+  const task = roomSaveQueue.catch(() => {}).then(() => {
+    if (auth.currentUser?.uid !== uid) throw new Error('Authentication changed. Reload your prediction.');
+    return callRooms(input);
+  });
+  roomSaveQueue = task;
+  return task;
+}
 
 /**
  * Get the current page container based on mode
@@ -69,7 +85,13 @@ function getPage() {
  * @param {string} sessionKey 
  * @param {boolean} resultsMode - true if admin results entry
  */
-async function renderPredictionBuilder(raceId, sessionKey, resultsMode = false, editMode = false) {
+async function renderPredictionBuilder(raceId, sessionKey, resultsMode = false, editMode = false, roomId = null) {
+  // Capture a pending draft before changing room/session state.
+  if (saveTimeout) { clearTimeout(saveTimeout); saveTimeout = null; void performSave(); }
+  const version = ++builderVersion;
+  builderUid = auth.currentUser?.uid;
+  currentRoomId = resultsMode ? null : roomId;
+  roomContext = null;
   const page = resultsMode
     ? document.getElementById('results-page')
     : document.getElementById('predict-page');
@@ -100,7 +122,9 @@ async function renderPredictionBuilder(raceId, sessionKey, resultsMode = false, 
 
   try {
     // Load race data
-    currentRace = await getDocument('races', raceId);
+    const loadedRace = await getDocument('races', raceId);
+    if (version !== builderVersion) return;
+    currentRace = loadedRace;
     if (!currentRace) {
       page.innerHTML = `
         <div class="empty-state">
@@ -126,6 +150,11 @@ async function renderPredictionBuilder(raceId, sessionKey, resultsMode = false, 
 
     const sessions = SESSION_KEYS[currentRace.weekendType] || SESSION_KEYS.standard;
     currentSession = sessions.includes(sessionKey) ? sessionKey : sessions[0];
+    if (currentRoomId) {
+      const context = await callRooms({ action: 'roomPrediction', id: currentRoomId, raceId, session: currentSession });
+      if (version !== builderVersion) return;
+      roomContext = context;
+    }
 
     // Determine lock and void state (including per-session controls)
     const sessionLocks = currentRace.sessionLocks || {};
@@ -155,7 +184,9 @@ async function renderPredictionBuilder(raceId, sessionKey, resultsMode = false, 
     const scoreReads = new Map();
     const loadScore = s => {
       if (!scoreReads.has(s)) {
-        scoreReads.set(s, getDocument('scores', `${auth.currentUser.uid}_${raceId}_${s}`));
+        scoreReads.set(s, currentRoomId
+          ? (s === currentSession ? Promise.resolve(roomContext.score) : callRooms({ action: 'roomPrediction', id: currentRoomId, raceId, session: s }).then(context => context.score))
+          : getDocument('scores', `${auth.currentUser.uid}_${raceId}_${s}`));
       }
       return scoreReads.get(s);
     };
@@ -174,8 +205,14 @@ async function renderPredictionBuilder(raceId, sessionKey, resultsMode = false, 
     let existingOrder = [];
     if (resultsMode) {
       const existingResult = resultDocs[sessions.indexOf(currentSession)];
+      publicationRevision = existingResult?.publicationRevision || 0;
       if (existingResult?.order) {
         existingOrder = existingResult.order;
+      }
+      if (!existingResult?.calculatedAt || editMode) {
+        const draft = await getDocument('resultDrafts', `${raceId}_${currentSession}`);
+        if (version !== builderVersion) return;
+        if (draft?.baseRevision === publicationRevision && draft?.order) existingOrder = draft.order;
       }
       if (existingResult?.calculatedAt) {
         if (!editMode) {
@@ -190,7 +227,8 @@ async function renderPredictionBuilder(raceId, sessionKey, resultsMode = false, 
       const predId = `${auth.currentUser.uid}_${raceId}_${currentSession}`;
       let existingPred = null;
       try {
-        existingPred = await getDocument('predictions', predId);
+        existingPred = currentRoomId ? roomContext.prediction : await getDocument('predictions', predId);
+        if (version !== builderVersion) return;
       } catch (err) {
         // If document doesn't exist yet or rules reject checking a non-existent doc, treat as new prediction
         console.warn(`[Predictions] No existing prediction found or error reading ${predId}:`, err);
@@ -205,7 +243,7 @@ async function renderPredictionBuilder(raceId, sessionKey, resultsMode = false, 
       }
 
       // Check if official results exist
-      if (isLocked || currentRace.status === 'completed') {
+      if (!currentRoomId && (isLocked || currentRace.status === 'completed')) {
         try {
           const existingResult = await getDocument('results', `${raceId}_${currentSession}`);
           if (existingResult?.order && existingResult?.calculatedAt) {
@@ -217,6 +255,14 @@ async function renderPredictionBuilder(raceId, sessionKey, resultsMode = false, 
           console.warn('[Predictions] Could not check official results:', e);
         }
       }
+    }
+
+    if (currentRoomId) {
+      isReadOnly = roomContext.readOnly;
+      isLocked = roomContext.readOnly;
+      officialResultOrder = roomContext.result;
+      userSessionScoreData = roomContext.score;
+      hasCalculatedResults = !!roomContext.result;
     }
 
     // Initialize order and pool
@@ -240,15 +286,17 @@ async function renderPredictionBuilder(raceId, sessionKey, resultsMode = false, 
     }
 
     // Render the page
+    if (version !== builderVersion) return;
     renderBuilderUI(page, sessions, sessionScores, sessionResultsStatus);
 
   } catch (error) {
+    if (version !== builderVersion) return;
     console.error('[Predictions] Error:', error);
     page.innerHTML = `
       <div class="empty-state">
         ${renderEmptyStateSVG()}
         <h3 class="empty-state-title">Failed to load predictions</h3>
-        <p class="empty-state-text">${error.message}</p>
+        <p class="empty-state-text">${escapeHTML(error.message)}</p>
         <button class="btn btn-secondary" onclick="window.location.hash='#dashboard'">Back to Dashboard</button>
       </div>
     `;
@@ -269,6 +317,7 @@ function renderBuilderUI(page, sessions, sessionScores, sessionResultsStatus = {
   const isCurrentSessionLocked = currentRace.status === 'locked' || currentRace.status === 'completed' || sessionLocks[currentSession] === true || isCurrentSessionVoided;
 
   page.innerHTML = `
+    ${currentRoomId ? `<nav class="room-actions"><a class="btn btn-secondary" href="#rooms/${escapeHTML(currentRoomId)}">Back to room & standings</a><span>Private room prediction · ${roomContext.deadline ? `Deadline: ${escapeHTML(new Date(roomContext.deadline).toLocaleString())}` : 'Awaiting Race Control deadline'}</span></nav>` : ''}
     <div class="page-header" style="margin-bottom: var(--space-4);">
       <p class="eyebrow">${isResultsMode ? 'RACE CONTROL / OFFICIAL CLASSIFICATION' : 'YOUR STRATEGY / PREDICTION BUILDER'}</p>
       <div style="display: flex; align-items: center; gap: var(--space-3); flex-wrap: wrap;">
@@ -289,7 +338,7 @@ function renderBuilderUI(page, sessions, sessionScores, sessionResultsStatus = {
                     : '<span class="badge badge-active">ADMIN: RESULTS ENTRY</span>'))
             : (userSessionScoreData ? `
                 <span class="badge" style="background: var(--accent); color: white; border: none;">SCORE: ${userSessionScoreData.totalPoints} PTS</span>
-                <button class="btn btn-ghost btn-sm" id="btn-export-xlsx" style="margin-left: var(--space-2);">
+                ${!currentRoomId ? `<button class="btn btn-ghost btn-sm" id="btn-export-xlsx" style="margin-left: var(--space-2);">
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="margin-right: 6px; vertical-align: text-bottom;">
                     <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
                     <polyline points="14 2 14 8 20 8"></polyline>
@@ -298,9 +347,9 @@ function renderBuilderUI(page, sessions, sessionScores, sessionResultsStatus = {
                     <polyline points="10 9 9 9 8 9"></polyline>
                   </svg>
                   Export Excel
-                </button>
+                </button>` : ''}
               ` : ''))}
-        ${(playerHasLocked && !isResultsMode && !isCurrentSessionVoided) ? `
+        ${(playerHasLocked && !isResultsMode && !isCurrentSessionVoided && (!currentRoomId || Date.now() >= roomContext.deadline)) ? `
           <button class="btn btn-secondary btn-sm" id="btn-view-others" style="margin-left: var(--space-2);">
             👀 View Others
           </button>
@@ -431,7 +480,8 @@ function renderBuilderUI(page, sessions, sessionScores, sessionResultsStatus = {
 
   // Back button
   getPage().querySelector('#btn-back-predict')?.addEventListener('click', () => {
-    navigateTo(isResultsMode ? 'races' : 'dashboard');
+    if (currentRoomId) navigateTo('rooms', currentRoomId);
+    else navigateTo(isResultsMode ? 'races' : 'dashboard');
   });
 
   // Export XLSX
@@ -527,7 +577,7 @@ async function fetchAndShowOthersPredictions() {
   `);
 
   try {
-    const allPredictions = await queryCollection('predictions', [
+    const allPredictions = currentRoomId ? (await callRooms({ action: 'roomOthers', id: currentRoomId, raceId: currentRace.id, session: currentSession })).predictions : await queryCollection('predictions', [
       ['raceId', '==', currentRace.id],
       ['session', '==', currentSession]
     ]);
@@ -750,7 +800,8 @@ function bindTabEvents(sessions) {
       // Navigate to the new session tab
       const raceId = currentRace.id;
       const route = isResultsMode ? 'results' : 'predict';
-      navigateTo(route, raceId, session);
+      if (currentRoomId) navigateTo(route, raceId, session, currentRoomId);
+      else navigateTo(route, raceId, session);
     });
   });
 }
@@ -944,6 +995,7 @@ function triggerAutoSave() {
 
   clearTimeout(saveTimeout);
   saveTimeout = setTimeout(() => {
+    saveTimeout = null;
     performSave();
   }, 800);
 }
@@ -952,12 +1004,16 @@ function triggerAutoSave() {
  * Save prediction to Firestore
  */
 async function performSave() {
+  if (!currentRace || isReadOnly || !auth.currentUser || auth.currentUser.uid !== builderUid) return;
   const indicator = getPage().querySelector('#save-indicator');
 
   try {
-    if (isResultsMode) {
+    if (currentRoomId) {
+      await saveRoomPrediction({ action: 'roomSave', id: currentRoomId, raceId: currentRace.id, session: currentSession, order: [...orderedDrivers], lock: false });
+    } else if (isResultsMode) {
       // Save as result (admin)
-      await setDocument('results', `${currentRace.id}_${currentSession}`, {
+      await setDocument('resultDrafts', `${currentRace.id}_${currentSession}`, {
+        baseRevision: publicationRevision,
         raceId: currentRace.id,
         session: currentSession,
         order: orderedDrivers,
@@ -1046,12 +1102,21 @@ function bindConfirmEvents() {
  * Handle player locking their prediction
  */
 async function handleLockPrediction() {
+  const roomId = currentRoomId, raceId = currentRace.id, session = currentSession;
+  const order = [...orderedDrivers], version = builderVersion;
   showModal({
     title: 'Lock Prediction?',
     message: "This is your final order for this session. You won't be able to change it.",
     confirmText: 'Lock It ✓',
     onConfirm: async () => {
       try {
+        clearTimeout(saveTimeout); saveTimeout = null;
+        if (roomId) {
+          await saveRoomPrediction({ action: 'roomSave', id: roomId, raceId, session, order, lock: true });
+          if (version === builderVersion) await renderPredictionBuilder(raceId, session, false, false, roomId);
+          showToast('Room prediction locked! Good luck 🏁', 'success');
+          return;
+        }
         const predId = `${auth.currentUser.uid}_${currentRace.id}_${currentSession}`;
         await setDocument('predictions', predId, {
           userId: auth.currentUser.uid,
@@ -1100,7 +1165,8 @@ async function handleConfirmResults() {
       : 'This will trigger score calculation for all players who made predictions for this session.',
     confirmText: isUpdate ? 'Update Results ✓' : 'Confirm Results ✓',
     onConfirm: async () => {
-      await processResults(currentRace.id, currentSession, orderedDrivers);
+      clearTimeout(saveTimeout); saveTimeout = null;
+      await processResults(currentRace.id, currentSession, [...orderedDrivers], publicationRevision);
     }
   });
 }
@@ -1109,6 +1175,7 @@ async function handleConfirmResults() {
  * Clean up prediction builder state
  */
 function cleanupPredictions() {
+  builderVersion++;
   clearTimeout(saveTimeout);
   currentRace = null;
   currentSession = null;
@@ -1123,6 +1190,8 @@ function cleanupPredictions() {
   isEditingExistingResults = false;
   officialResultOrder = null;
   userSessionScoreData = null;
+  currentRoomId = null;
+  roomContext = null;
 }
 
 // --- Exports ---

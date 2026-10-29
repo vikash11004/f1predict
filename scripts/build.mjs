@@ -1,0 +1,13 @@
+import { mkdir, cp, readFile, writeFile } from 'node:fs/promises';
+import { resolve } from 'node:path';
+import { createHash } from 'node:crypto';
+const environment = process.argv[2] || 'staging';
+if (!['development','staging','production'].includes(environment)) throw Error('Unknown environment');
+const out = resolve('dist', environment);
+await mkdir(out,{recursive:true});
+for (const path of ['index.html','assets','styles','js']) await cp(path,resolve(out,path),{recursive:true});
+const config = (await readFile('js/environment.js','utf8')).replace('environment = "development"',`environment = "${environment}"`);
+if (!config.includes('projectId: "f1predict-1188e"')) throw Error('Unexpected Firebase target');
+await writeFile(resolve(out,'js/environment.js'),config);
+await writeFile(resolve(out,'release.json'),JSON.stringify({environment,project:'f1predict-1188e',builtAt:new Date().toISOString(),configHash:createHash('sha256').update(config).digest('hex')},null,2));
+console.log(`Built ${out}; no deployment performed.`);

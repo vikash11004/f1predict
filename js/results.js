@@ -5,6 +5,7 @@
 
 import {
   auth,
+  callRooms,
   isAdmin,
   getDocument,
   setDocument,
@@ -75,7 +76,15 @@ async function renderResults(raceId, sessionKey, editOverride = false) {
  * @param {string} session 
  * @param {Array<string>} officialOrder - array of 22 driverIds in official finishing order
  */
-async function processResults(raceId, session, officialOrder) {
+async function processResults(raceId, session, officialOrder, expectedRevision) {
+  if (!isAdmin()) {
+    showToast('Administrator access is required.', 'error');
+    return;
+  }
+  if (!Array.isArray(officialOrder) || officialOrder.length !== 22 || new Set(officialOrder).size !== 22 || officialOrder.some(id => !getDriver(id))) {
+    showToast('Official results must contain all 22 eligible drivers exactly once.', 'error');
+    return;
+  }
   const page = document.getElementById('results-page');
   
   if (page) {
@@ -88,119 +97,18 @@ async function processResults(raceId, session, officialOrder) {
   }
 
   try {
-    // 1. Save the official result
-    await setDocument('results', `${raceId}_${session}`, {
-      raceId,
-      session,
-      order: officialOrder,
-      calculatedAt: serverTimestamp()
-    }, true);
-
-    // 2. Get all predictions for this session
-    const predictions = await queryCollection('predictions', [
-      ['raceId', '==', raceId],
-      ['session', '==', session]
-    ]);
-
-    const batch = createBatch();
-
-    // Auto-complete the race if all non-voided sessions now have results
-    const raceDoc = await getDocument('races', raceId);
-    if (raceDoc && raceDoc.status !== 'completed') {
-      const allSessions = SESSION_KEYS[raceDoc.weekendType] || SESSION_KEYS.standard;
-      const cancelledSessions = raceDoc.cancelledSessions || {};
-      const nonVoidedSessions = allSessions.filter(s => cancelledSessions[s] !== true);
-      
-      let allDone = true;
-      for (const s of nonVoidedSessions) {
-        if (s === session) continue;
-        try {
-          const res = await getDocument('results', `${raceId}_${s}`);
-          if (!res?.calculatedAt) { allDone = false; break; }
-        } catch { allDone = false; break; }
-      }
-      
-      if (allDone && nonVoidedSessions.length > 0) {
-        const raceRef = getDocRef('races', raceId);
-        batch.update(raceRef, { status: 'completed' });
-      }
-    }
-
-    if (predictions.length === 0) {
-      await batch.commit();
-      showToast(`Results confirmed for ${SESSION_FULL_LABELS[session] || session}! (0 player predictions)`, 'info');
-      await renderResultsBreakdown(raceId, session);
-      return;
-    }
-
-    // 3. Calculate scores for each player
-    const playerScores = [];
-    for (const pred of predictions) {
-      if (!pred.order || pred.order.length !== 22) continue;
-
-      const result = calculateSessionScore(pred.order, officialOrder, session);
-      playerScores.push({
-        userId: pred.userId,
-        predictionId: pred.id,
-        ...result
-      });
-    }
-
-    // 4. Batch update user scores, compute overall session wins, and save per-prediction scores
-    const allExistingScores = await getAllDocuments('scores');
-    const combinedScores = (allExistingScores || []).filter(s => !(s.raceId === raceId && s.session === session));
-    for (const ps of playerScores) {
-      combinedScores.push({
-        userId: ps.userId,
-        raceId,
-        session,
-        totalPoints: ps.totalPoints
-      });
-    }
-    const userWinsMap = calculateSessionWins(combinedScores);
-
-    for (const ps of playerScores) {
-      const oldScoreDoc = await getDocument('scores', `${ps.userId}_${raceId}_${session}`);
-      let delta = ps.totalPoints;
-      if (oldScoreDoc && oldScoreDoc.totalPoints !== undefined) {
-        delta = ps.totalPoints - oldScoreDoc.totalPoints;
-      }
-
-      const userData = await getDocument('users', ps.userId);
-      if (!userData) continue;
-
-      const newSeasonPoints = (userData.seasonPoints || 0) + delta;
-      const userRef = getDocRef('users', ps.userId);
-      batch.update(userRef, {
-        seasonPoints: newSeasonPoints,
-        lastEventScore: ps.totalPoints,
-        wins: userWinsMap[ps.userId] || 0
-      });
-
-      const scoreRef = getDocRef('scores', `${ps.userId}_${raceId}_${session}`);
-      batch.set(scoreRef, {
-        userId: ps.userId,
-        raceId,
-        session,
-        totalPoints: ps.totalPoints,
-        accuracyPoints: ps.accuracyPoints,
-        bonusPoints: ps.bonusPoints,
-        driverScores: ps.driverScores,
-        bonuses: ps.bonuses,
-        calculatedAt: serverTimestamp()
-      });
-    }
-
-    await batch.commit();
-
-    // 5. Show results breakdown
-    await showResultsBreakdown(page, playerScores, officialOrder, raceId, session);
-    showToast(`Scores calculated for ${SESSION_FULL_LABELS[session] || session}!`, 'success');
+    await callRooms({ action: 'publishResults', raceId, session, order: officialOrder, expectedRevision });
+    await renderResultsBreakdown(raceId, session);
+    showToast('Official results and scores published.', 'success');
 
   } catch (error) {
-    console.error('[Results] Error processing results:', error);
-    showToast('Failed to calculate scores: ' + error.message, 'error');
-    navigateTo('races');
+    console.error('[Results] Publication failed', { code: error?.code || 'unknown' });
+    if (page) {
+      page.innerHTML = `<div class="empty-state"><h2>Publication needs attention</h2><p>${error.code === 'functions/aborted' ? 'Another administrator changed these results. Reload before editing again.' : 'Publication could not be confirmed. Retrying this same order is safe.'}</p><button class="btn btn-primary" id="publication-retry">Retry publication</button><button class="btn btn-secondary" id="publication-reload">Reload session</button></div>`;
+      page.querySelector('#publication-retry').disabled = error.code === 'functions/aborted';
+      page.querySelector('#publication-retry').onclick = () => processResults(raceId, session, officialOrder, expectedRevision);
+      page.querySelector('#publication-reload').onclick = () => renderResults(raceId, session);
+    }
   }
 }
 

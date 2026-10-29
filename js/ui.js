@@ -86,6 +86,11 @@ function navigateTo(page, ...params) {
  * @param {Array} params 
  */
 function showPage(pageName, params = []) {
+  if (!pageRenderers[pageName]) {
+    navigateTo(auth.currentUser ? 'dashboard' : 'auth');
+    return;
+  }
+
   // Hide all pages
   document.querySelectorAll('.page').forEach(p => {
     p.classList.remove('active');

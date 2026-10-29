@@ -2,6 +2,7 @@
 import { initAuth, renderAuthScreen } from './auth.js';
 import { renderDashboard, cleanupDashboard } from './dashboard.js';
 import { renderRaces } from './races.js';
+import { renderRooms } from './rooms.js';
 import { renderPredictionBuilder, cleanupPredictions } from './predictions.js';
 import { renderResults } from './results.js';
 import { renderLeaderboard, cleanupLeaderboard } from './leaderboard.js';
@@ -11,9 +12,10 @@ import { registerPage, initRouter, initNav } from './ui.js';
 registerPage('auth', renderAuthScreen);
 registerPage('dashboard', renderDashboard);
 registerPage('races', renderRaces);
-registerPage('predict', (raceId, session) => {
+registerPage('rooms', renderRooms);
+registerPage('predict', (raceId, session, roomId) => {
   if (raceId && session) {
-    renderPredictionBuilder(raceId, session, false);
+    renderPredictionBuilder(raceId, session, false, false, roomId || null);
   } else if (raceId) {
     renderPredictionBuilder(raceId, 'quali', false);
   }

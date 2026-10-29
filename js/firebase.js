@@ -4,13 +4,24 @@
 // ============================================
 
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js';
+import { getAnalytics, isSupported } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-analytics.js';
 import {
   getAuth,
   signInWithEmailAndPassword,
   createUserWithEmailAndPassword,
   signOut,
   onAuthStateChanged,
-  updateProfile
+  updateProfile,
+  setPersistence,
+  browserLocalPersistence,
+  GoogleAuthProvider,
+  signInWithPopup,
+  signInWithRedirect,
+  getRedirectResult,
+  sendPasswordResetEmail,
+  sendEmailVerification,
+  linkWithCredential,
+  connectAuthEmulator
 } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js';
 import {
   getFirestore,
@@ -29,33 +40,59 @@ import {
   writeBatch,
   onSnapshot,
   serverTimestamp,
-  increment
+  increment,
+  connectFirestoreEmulator
 } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js';
 
 // --- Firebase Configuration ---
-const firebaseConfig = {
-  apiKey: "AIzaSyC2ZzcN0DlM10jmUZSK6z_TW-CT1jrY7ZI",
-  authDomain: "f1-prediction-e3cbd.firebaseapp.com",
-  projectId: "f1-prediction-e3cbd",
-  storageBucket: "f1-prediction-e3cbd.firebasestorage.app",
-  messagingSenderId: "1021978957222",
-  appId: "1:1021978957222:web:b9714b5fcb5b39415eab67",
-  measurementId: "G-EJBYMG49ZX"
-};
+import { firebaseConfig, environment } from './environment.js';
 
 // --- Initialize Firebase ---
-const app = initializeApp(firebaseConfig);
+const emulatorMode = environment === 'development' && ['localhost', '127.0.0.1'].includes(location.hostname);
+const app = initializeApp(emulatorMode ? { ...firebaseConfig, projectId: 'demo-f1predict', apiKey: 'demo-key' } : firebaseConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
+export async function callRooms(data) {
+  const { getFunctions, connectFunctionsEmulator, httpsCallable } = await import('https://www.gstatic.com/firebasejs/10.12.2/firebase-functions.js');
+  const functions = getFunctions(app, 'us-central1');
+  if (emulatorMode && !callRooms.connected) {
+    connectFunctionsEmulator(functions, '127.0.0.1', 5001);
+    callRooms.connected = true;
+  }
+  return (await httpsCallable(functions, 'rooms')(data)).data;
+}
+if (emulatorMode) {
+  connectAuthEmulator(auth, 'http://127.0.0.1:9099');
+  connectFirestoreEmulator(db, '127.0.0.1', 8080);
+}
+
+let analytics = null;
+isSupported().then((supported) => {
+  // Invitation URLs contain bearer secrets; do not send them to Analytics.
+  if (supported && !emulatorMode && !new URLSearchParams(location.search).has('roomInvite')) {
+    analytics = getAnalytics(app);
+  }
+}).catch(() => {});
 
 
-const ADMIN_UID = "HI5xCVYecISuzRVSdJAb6aHcuHe2";
+// Admin authorization is enforced by the Firestore custom claim below, never
+// by a client-controlled user document or local storage value.
+const ADMIN_UID = null;
+let adminClaim = false;
+
+const authReady = setPersistence(auth, browserLocalPersistence).catch((error) => {
+  console.warn('[Firebase] Could not enable local auth persistence:', error.code || error.message);
+});
 
 /**
  * Check if the currently logged-in user is the admin
  */
 function isAdmin() {
-  return auth.currentUser?.uid === ADMIN_UID;
+  return adminClaim === true;
+}
+
+function setAdminClaim(value) {
+  adminClaim = value === true;
 }
 
 // --- Firestore Helper Functions ---
@@ -217,14 +254,27 @@ export {
   app,
   auth,
   db,
+  authReady,
+  analytics,
+  firebaseConfig,
   ADMIN_UID,
   isAdmin,
+  setAdminClaim,
   // Auth functions
   signInWithEmailAndPassword,
   createUserWithEmailAndPassword,
   signOut,
   onAuthStateChanged,
   updateProfile,
+  setPersistence,
+  browserLocalPersistence,
+  GoogleAuthProvider,
+  signInWithPopup,
+  signInWithRedirect,
+  getRedirectResult,
+  sendPasswordResetEmail,
+  sendEmailVerification,
+  linkWithCredential,
   // Firestore helpers
   getDocument,
   setDocument,

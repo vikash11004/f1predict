@@ -60,6 +60,7 @@ async function run() {
         ({ signedIn }) => {
           window.__signedIn = signedIn;
           window.__writes = [];
+          window.__authActions = [];
         },
         { signedIn },
       );
@@ -119,9 +120,29 @@ async function run() {
     await page.locator('#password-toggle').click();
     await page.locator('#auth-toggle').click();
     await page.locator('#auth-email').fill('alex@example.test');
+    await page.locator('#auth-reset').click();
+    await page.locator('.toast-success').waitFor();
+    assert.deepEqual(await page.evaluate(() => window.__authActions), ['password-reset']);
     await page.locator('#auth-submit').click();
     await page.locator('#card-next-race').waitFor();
     await screenshot(page, 'dashboard-desktop');
+    await page.locator('[data-recent-performance] .result-title').waitFor();
+    assert.match(await page.locator('#player-hub').innerText(), /No verified XP record yet/);
+    assert.match(await page.locator('[data-recent-performance]').innerText(), /No scored sessions yet/);
+    assert.equal(await page.locator('.season-progress').getAttribute('max'), '5');
+    await page.locator('[data-edit-profile]').click();
+    await page.locator('#profile-display-name').waitFor();
+    await page.locator('#close-profile').click();
+    await page.evaluate(async () => {
+      const db = await import('/js/firebase.js');
+      await db.setDocument('gamification', '2026_u1', { uid: 'u1', season: '2026', xp: 125, level: 2, levelStart: 100, nextLevel: 250, achievements: [{ id: 'first', name: 'On the grid' }], weekendAwards: [{ name: 'Test weekend' }], stats: { currentStreak: 1, bestStreak: 1, predictions: 2, scoredSessions: 2, bestScore: 440, perfects: 0 }, skippedSessions: 0 });
+      await db.setDocument('gamification/2026_u1/history', '1', { revision: 1, delta: 125, changes: [{ delta: 125, reason: 'Verified test awards' }] });
+      const { renderDashboard } = await import('/js/dashboard.js');
+      await renderDashboard();
+    });
+    await page.getByText('Level 2', { exact: true }).waitFor();
+    assert.match(await page.locator('[data-hub-section="Achievements"]').innerText(), /On the grid/);
+    assert.match(await page.locator('[data-xp-history]').innerText(), /125 XP/);
     assert.match(await page.locator('#cd-days').innerText(), /^\d{2}$/);
     await page.locator('[data-page=races]').click();
     await page.locator('.race-calendar-row').first().waitFor();
@@ -154,6 +175,11 @@ async function run() {
     await screenshot(page, 'prediction-desktop');
     await page.locator('#btn-signout').click();
     await page.locator('#auth-submit:enabled').waitFor();
+    await page.locator('#google-auth').click();
+    await page.locator('#card-next-race').waitFor();
+    assert.ok(await page.evaluate(() => window.__authActions.includes('google-sign-in')));
+    await page.locator('#btn-signout').click();
+    await page.locator('#auth-submit:enabled').waitFor();
     const mobile = await open(390, 844, true);
     await mobile.locator('#card-next-race').waitFor();
     await screenshot(mobile, 'dashboard-mobile');
@@ -176,9 +202,71 @@ async function run() {
     await mobile.evaluate(() => (location.hash = '#predict/r3/quali'));
     await mobile.locator('#driver-pool .driver-card').first().waitFor();
     await screenshot(mobile, 'prediction-mobile');
+    await mobile.evaluate(() => (location.hash = '#rooms'));
+    await mobile.locator('#room-create').waitFor();
+    await mobile.locator('#room-join input').fill('bad');
+    await mobile.locator('#room-join button').click();
+    await mobile.getByText('Invalid invitation. Check the code with your host.', { exact: true }).waitFor();
+    await mobile.locator('#room-join input').fill('full');
+    await mobile.locator('#room-join button').click();
+    await mobile.getByText('This room is full. Ask your host for another room.', { exact: true }).waitFor();
+    await mobile.locator('#room-name').fill('Friends <script>');
+    await mobile.locator('#room-description').fill('Our weekend');
+    await screenshot(mobile, 'rooms-mobile');
+    await mobile.locator('#room-create button').click();
+    await mobile.locator('#room-invite').waitFor();
+    await mobile.locator('#room-invite').click();
+    await mobile.locator('#room-code').waitFor();
+    assert.equal(await mobile.locator('#room-code').inputValue(), 'a'.repeat(36));
+    await screenshot(mobile, 'room-overview-mobile');
+    await mobile.locator('#room-finalize').click();
+    await mobile.locator('#room-confirm-finalize').click();
+    await mobile.getByText('1 / 10 members · Membership finalized', { exact: true }).waitFor();
+    assert.equal(await mobile.locator('#room-invite').count(), 0);
+    await mobile.locator('#room-predict-form').waitFor();
+    await mobile.locator('#room-predict-form button').click();
+    await mobile.locator('#driver-pool .driver-card').first().waitFor();
+    assert.ok(mobile.url().endsWith('#predict/r3/quali/test-room'));
+    await mobile.locator('#driver-pool .driver-card').first().click();
+    await mobile.waitForFunction(() => window.__roomWrites?.some(w => w.order.length === 1));
+    await mobile.locator('.session-tab[data-session=race]').click();
+    await mobile.locator('#driver-pool .driver-card').first().waitFor();
+    assert.equal(await mobile.locator('#order-list .filled').count(),0);
+    await mobile.locator('.session-tab[data-session=quali]').click();
+    await mobile.waitForFunction(() => document.querySelectorAll('#order-list .filled').length === 1);
+    for (let i=1; i<22; i++) await mobile.locator('#driver-pool .driver-card').first().click();
+    // Exercise the same HTML drag/drop handlers used in the global builder.
+    const beforeDrag = await mobile.locator('#order-list .filled').first().getAttribute('data-driver-id');
+    await mobile.evaluate(() => {
+      const slots = document.querySelectorAll('#order-list .filled');
+      const transfer = new DataTransfer();
+      slots[0].dispatchEvent(new DragEvent('dragstart',{bubbles:true,dataTransfer:transfer}));
+      slots[1].dispatchEvent(new DragEvent('drop',{bubbles:true,dataTransfer:transfer}));
+    });
+    assert.notEqual(await mobile.locator('#order-list .filled').first().getAttribute('data-driver-id'),beforeDrag);
+    await screenshot(mobile,'room-prediction-mobile');
+    await mobile.locator('#btn-confirm').click();
+    await mobile.locator('#modal-confirm').click();
+    await mobile.waitForFunction(() => window.__roomWrites?.some(w=>w.lock));
+    await mobile.waitForFunction(() => document.querySelector('#confirm-bar')?.classList.contains('hidden'));
+    assert.equal(await mobile.locator('#btn-view-others').count(),0);
+    const savedRoomOrder = await mobile.evaluate(() => window.__roomWrites.findLast(w=>w.lock).order);
+    assert.equal(new Set(savedRoomOrder).size,22);
+    await mobile.evaluate(() => location.hash='#predict/r3/quali');
+    await mobile.locator('#driver-pool .driver-card').first().waitFor();
+    assert.equal(await mobile.locator('#order-list .filled').count(),0);
+    await mobile.evaluate(() => location.hash='#leaderboard');
+    await mobile.locator('.podium-card').first().waitFor();
+    assert.equal(await mobile.locator('.leaderboard-row').count(),4);
     await mobile.locator('#btn-signout').click();
     await mobile.locator('#auth-submit:enabled').waitFor();
     await screenshot(mobile, 'auth-mobile');
+    await mobile.evaluate(() => history.replaceState(null, '', '?roomInvite=' + 'a'.repeat(36) + '#auth'));
+    await mobile.locator('#auth-email').fill('alex@example.test');
+    await mobile.locator('#auth-password').fill('example-password');
+    await mobile.locator('#auth-submit').click();
+    await mobile.locator('#room-join').waitFor();
+    assert.equal(await mobile.locator('#room-join input').inputValue(), 'a'.repeat(36));
     const blocked = await open(390, 844, false, false);
     await blocked.locator('#retry-connection').waitFor();
     assert.equal(await blocked.locator('#auth-submit').isDisabled(), true);
@@ -187,10 +275,32 @@ async function run() {
       const responsive = await open(width, 900, true);
       await responsive.locator('#card-next-race').waitFor();
       await screenshot(responsive, 'overview-' + width);
+      await responsive.evaluate(() => (location.hash = '#rooms'));
+      await responsive.locator('#room-create').waitFor();
+      await responsive.locator('summary').filter({hasText: 'Future room access pricing'}).click();
+      assert.equal(await responsive.getByRole('button', {name: 'Checkout unavailable'}).isDisabled(), true);
+      await responsive.locator('#room-capacity').fill('26');
+      assert.match(await responsive.locator('#commerce-band').textContent(), /up to 50/);
+      for (const scenario of ['pending', 'success', 'failure', 'cancelled']) {
+        await responsive.locator('#commerce-scenario').selectOption(scenario);
+        await responsive.locator('#commerce-test').click();
+        await responsive.waitForFunction(() => document.querySelector('#commerce-state').textContent.startsWith('Simulation:'));
+        assert.match(await responsive.locator('#commerce-state').textContent(), /No payment verified; no room created/);
+      }
+      await responsive.locator('#commerce-test').click();
+      await responsive.locator('#commerce-history').click();
+      await responsive.waitForFunction(() => document.querySelectorAll('#commerce-history-list li').length === 4);
+      await responsive.evaluate(() => window.__commerceFailure = true);
+      await responsive.locator('#commerce-test').click();
+      await responsive.waitForFunction(() => document.querySelector('#commerce-state').textContent.includes('Simulation unavailable'));
+      await responsive.evaluate(() => window.__commerceFailure = false);
+      await responsive.locator('#commerce-test').click();
+      await responsive.waitForFunction(() => document.querySelector('#commerce-state').textContent.startsWith('Simulation:'));
+      await screenshot(responsive, 'rooms-' + width);
     }
     assert.deepEqual(errors, []);
     console.log(
-      'PASS: Auth validation, account toggle, password visibility, sign-in/out, overview, calendar filters and keyboard details, standings, driver selection, mobile menu, no horizontal overflow, and offline state. Firebase isolated with browser-only fixtures; no live writes.',
+      'PASS: Auth validation, sign-in/out, overview, calendar, standings, driver selection, mobile menu, room creation/invitations/finalization, full and invalid states, invitation preserved through login, no horizontal overflow, and offline state. Firebase isolated with browser-only fixtures; no live writes.',
     );
   } finally {
     if (browser) await browser.close();

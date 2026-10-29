@@ -1,4 +1,12 @@
 {
+  "functions": [{ "source": ".", "codebase": "gamification", "runtime": "nodejs22", "ignore": ["node_modules", ".git", ".npm-cache", ".tools", "tests", "*-debug.log", "serviceAccountKey*.json", ".env*", "assets", "styles"] }],
+  "emulators": {
+    "auth": { "host": "127.0.0.1", "port": 9099 },
+    "firestore": { "host": "127.0.0.1", "port": 8080 },
+    "functions": { "host": "127.0.0.1", "port": 5001 },
+    "ui": { "enabled": false },
+    "singleProjectMode": true
+  },
   "firestore": {
     "rules": "firestore.rules"
   }

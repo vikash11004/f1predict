@@ -1,0 +1,12 @@
+import { initializeApp } from 'firebase-admin/app';
+import { getFirestore, Timestamp } from 'firebase-admin/firestore';
+import { DEFAULT_CONFIG } from '../functions/engine.mjs';
+if (process.env.FIRESTORE_EMULATOR_HOST !== '127.0.0.1:8080') throw new Error('Local emulator required: set FIRESTORE_EMULATOR_HOST=127.0.0.1:8080');
+initializeApp({ projectId: 'demo-f1predict' });
+const db = getFirestore();
+const order = Array.from({ length: 22 }, (_, i) => `demo-driver-${i + 1}`);
+await db.doc('gamificationConfig/current').set(DEFAULT_CONFIG);
+await db.doc('races/demo-weekend').set({ name: 'Demo Grand Prix', circuit: 'Local test circuit', country: 'Test', countryFlag: '🏁', season: '2026', round: 1, weekendType: 'standard', status: 'active', raceDate: new Date(Date.now() + 86400000).toISOString(), gamificationDriverIds: order, sessionDeadlines: { quali: Timestamp.fromMillis(Date.now() + 3600000), race: Timestamp.fromMillis(Date.now() + 7200000) } });
+for (const [i, id] of order.entries()) await db.doc(`drivers/${id}`).set({ name: `Demo Driver ${i + 1}`, code: `D${i + 1}`, number: i + 1, team: 'demo' });
+await db.doc('teams/demo').set({ name: 'Demo team', color: '#E8002D' });
+console.log('Local demo configuration and weekend ready. No live project accessed.');

@@ -8,11 +8,70 @@ service cloud.firestore {
     }
 
     function isAdmin() {
-      return isAuthenticated() && request.auth.uid == "HI5xCVYecISuzRVSdJAb6aHcuHe2";
+      return isAuthenticated() && request.auth.token.get('admin', false) == true;
     }
 
     function isOwner(userId) {
       return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function validRace(data) {
+      return data.name is string && data.name.size() > 0 && data.name.size() <= 120
+        && data.round is int && data.round > 0 && data.round <= 60
+        && data.weekendType in ['standard', 'sprint']
+        && data.status in ['upcoming', 'active', 'locked', 'completed'];
+    }
+
+    function validResult(data, resultId) {
+      return data.raceId is string && data.session in ['quali', 'race', 'sprint', 'sprint_quali']
+        && resultId == data.raceId + '_' + data.session
+        && exists(/databases/$(database)/documents/races/$(data.raceId))
+        && (data.session in ['quali', 'race'] || get(/databases/$(database)/documents/races/$(data.raceId)).data.weekendType == 'sprint')
+        && data.order is list && data.order.size() <= 22
+        && data.order.toSet().size() == data.order.size()
+        && (!('calculatedAt' in data) || (data.order.size() == 22 && data.calculatedAt == request.time));
+    }
+    function predictionSessionOpen(data) {
+      return !exists(/databases/$(database)/documents/results/$(data.raceId + '_' + data.session))
+        || !('calculatedAt' in get(/databases/$(database)/documents/results/$(data.raceId + '_' + data.session)).data);
+    }
+
+    // Award state and evidence are server-owned, including for browser admins.
+    match /rooms/{roomId} {
+      allow read: if isAuthenticated() && exists(/databases/$(database)/documents/rooms/$(roomId)/members/$(request.auth.uid));
+      allow write: if false;
+      match /members/{uid} {
+        allow read: if isAuthenticated() && exists(/databases/$(database)/documents/rooms/$(roomId)/members/$(request.auth.uid));
+        allow write: if false;
+      }
+      match /private/{id} { allow read, write: if false; }
+      match /chat/{id} { allow read, write: if false; }
+      // Predictions, score caches and XP are accessible only through the callable.
+      match /predictions/{id} { allow read, write: if false; }
+      match /rounds/{id} { allow read, write: if false; }
+      match /roundScores/{id} { allow read, write: if false; }
+      match /progress/{id} {
+        allow read, write: if false;
+        match /history/{revision} { allow read, write: if false; }
+      }
+    }
+    match /roomDirectories/{uid}/rooms/{id} {
+      allow read: if isOwner(uid);
+      allow write: if false;
+    }
+    match /roomInvitations/{id} { allow read, write: if false; }
+    match /predictionEvidence/{id} { allow read, write: if false; }
+    match /gamificationConfig/{id} {
+      allow read: if isAuthenticated();
+      allow write: if false;
+    }
+    match /gamification/{id} {
+      allow read: if isOwner(resource.data.uid) || isAdmin();
+      allow write: if false;
+      match /history/{revision} {
+        allow read: if isOwner(get(/databases/$(database)/documents/gamification/$(id)).data.uid) || isAdmin();
+        allow write: if false;
+      }
     }
 
     // --- Teams & Drivers Collections (Publicly readable) ---
@@ -33,15 +92,22 @@ service cloud.firestore {
 
       // Only the authenticated user can create their own profile with zero points
       allow create: if isOwner(userId)
+                    && request.resource.data.keys().hasOnly(['displayName', 'seasonPoints', 'lastEventScore', 'wins'])
+                    && request.resource.data.displayName is string
+                    && request.resource.data.displayName.size() > 0
+                    && request.resource.data.displayName.size() <= 60
                     && request.resource.data.seasonPoints == 0
                     && request.resource.data.lastEventScore == 0
                     && request.resource.data.wins == 0;
 
       // Regular users can only update their profile (e.g., displayName), not points
       // Admin can update points and scores during results calculation
-      allow update: if isAdmin() || (
+      allow update: if (
         isOwner(userId)
-        && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['seasonPoints', 'lastEventScore', 'wins'])
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['displayName'])
+        && request.resource.data.displayName is string
+        && request.resource.data.displayName.size() > 0
+        && request.resource.data.displayName.size() <= 60
       );
 
       // Only admin can delete user profiles
@@ -51,7 +117,8 @@ service cloud.firestore {
     // --- Races Collection (Publicly readable calendar/status) ---
     match /races/{raceId} {
       allow read: if true;
-      allow write: if isAdmin();
+      allow create, update: if isAdmin() && validRace(request.resource.data);
+      allow delete: if isAdmin();
     }
 
     // --- Predictions Collection ---
@@ -61,34 +128,55 @@ service cloud.firestore {
 
       // Create new prediction before lock
       allow create: if isAuthenticated()
+                    && predictionSessionOpen(request.resource.data)
                     && request.resource.data.userId == request.auth.uid
+                    && predId == request.auth.uid + '_' + request.resource.data.raceId + '_' + request.resource.data.session
                     && request.resource.data.order is list
-                    && request.resource.data.order.size() <= 22;
+                    && request.resource.data.order.size() <= 22
+                    && request.resource.data.raceId is string
+                    && request.resource.data.session is string
+                    && request.resource.data.session in ['quali', 'sprint_quali', 'sprint', 'race']
+                    && (!('lockedAt' in request.resource.data)
+                        || request.resource.data.lockedAt == null
+                        || (request.resource.data.order.size() == 22 && request.resource.data.lockedAt == request.time));
 
       // Update prediction only if not locked
       allow update: if isAuthenticated()
+                    && predictionSessionOpen(resource.data)
                     && resource.data.userId == request.auth.uid
                     && request.resource.data.userId == request.auth.uid
+                    && request.resource.data.raceId == resource.data.raceId
+                    && request.resource.data.session == resource.data.session
+                    && request.resource.data.order is list
+                    && request.resource.data.order.size() <= 22
+                    && (!('lockedAt' in request.resource.data)
+                        || request.resource.data.lockedAt == null
+                        || (request.resource.data.order.size() == 22 && request.resource.data.lockedAt == request.time))
                     && (!('lockedAt' in resource.data) || resource.data.lockedAt == null);
 
       // Delete only if not locked or by admin
-      allow delete: if isAdmin() || (
+      allow delete: if predictionSessionOpen(resource.data) && (isAdmin() || (
         isAuthenticated() 
         && resource.data.userId == request.auth.uid 
         && (!('lockedAt' in resource.data) || resource.data.lockedAt == null)
-      );
+      ));
+    }
+
+    match /resultDrafts/{id} {
+      allow read: if isAdmin();
+      allow write: if isAdmin() && validResult(request.resource.data, id) && !('calculatedAt' in request.resource.data);
     }
 
     // --- Results Collection ---
     match /results/{resultId} {
       allow read: if isAuthenticated();
-      allow write: if isAdmin();
+      allow write: if false;
     }
 
     // --- Scores Collection ---
     match /scores/{scoreId} {
       allow read: if isAuthenticated();
-      allow write: if isAdmin();
+      allow write: if false;
     }
 
     // --- Chat Messages Collection ---

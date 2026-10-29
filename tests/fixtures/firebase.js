@@ -1,4 +1,39 @@
 // Browser-only Firebase substitute. This file is never imported by the application.
+const testRooms = [];
+const testRoomPredictions = new Map();
+const commerceFixtures = new Map();
+export async function callRooms(input) {
+  if (input.action === 'commerceTestAttempt') {
+    if (window.__commerceFailure) throw new Error('Offline fixture');
+    const record = {simulation:true, paymentVerified:false, roomCreated:false, capacity:input.capacity, scenario:input.scenario};
+    commerceFixtures.set(input.requestId,record);
+    return record;
+  }
+  if (input.action === 'commerceTestHistory') return {simulation:true,purchases:[...commerceFixtures.values()],cursor:null};
+  if (input.action === 'list') return { rooms: testRooms, cursor: null };
+  if (input.action === 'create') {
+    const room = { ...input, id: 'test-room', hostUid: auth.currentUser.uid, role: 'host', status: 'open', memberCount: 1, members: [{ uid: auth.currentUser.uid, displayName: 'Alex Morgan', role: 'host' }] };
+    testRooms.push(room); return { id: room.id };
+  }
+  if (input.action === 'join') throw { code: input.code === 'full' ? 'functions/resource-exhausted' : 'functions/not-found' };
+  const room = testRooms.find(room => room.id === input.id);
+  if (!room) throw { code: 'functions/permission-denied' };
+  if (input.action === 'roomStandings') return { races: [{ id: 'r3', name: 'Japanese Grand Prix', round: 3, sessions: ['quali','race'] }], history: [], standings: [{ uid: auth.currentUser.uid, displayName:'Alex Morgan', position:1, totalPoints:0, racePoints:0, change:null }], progress:null };
+  const key = `${input.id}/${input.raceId}/${input.session}`;
+  if (input.action === 'roomSave') {
+    if (testRoomPredictions.get(key)?.lockedAt) throw { code:'functions/failed-precondition' };
+    testRoomPredictions.set(key, { ...input, userId:auth.currentUser.uid, ...(input.lock ? {lockedAt:true} : {}) });
+    window.__roomWrites ||= []; window.__roomWrites.push(input);
+    return { saved:true };
+  }
+  if (input.action === 'roomPrediction') {
+    const prediction = testRoomPredictions.get(key) || null;
+    return { prediction, readOnly:!!prediction?.lockedAt, score:null, result:null, deadline:Date.now()+3600000 };
+  }
+  if (input.action === 'overview') return room;
+  if (input.action === 'invite') return { code: 'a'.repeat(36) };
+  if (input.action === 'finalize') { room.status = 'finalized'; return { id: room.id }; }
+}
 const users = [
   {
     id: 'u1',
@@ -106,23 +141,29 @@ const data = {
 export const app = {},
   db = {},
   ADMIN_UID = 'admin',
+  authReady = Promise.resolve(),
   auth = {
     currentUser: window.__signedIn
-      ? { uid: 'u1', email: 'alex@example.test', displayName: 'Alex Morgan' }
+      ? { uid: 'u1', email: 'alex@example.test', displayName: 'Alex Morgan', emailVerified: true,
+          getIdTokenResult: async () => ({ claims: { admin: Boolean(window.__isAdmin) } }) }
       : null,
   };
 let authListener;
 export const isAdmin = () => Boolean(window.__isAdmin);
+export const setAdminClaim = () => {};
 export const onAuthStateChanged = (a, fn) => {
   authListener = fn;
   queueMicrotask(() => fn(auth.currentUser));
   return () => {};
 };
 export const signInWithEmailAndPassword = async () => {
+  window.__authActions?.push('password-sign-in');
   auth.currentUser = {
     uid: 'u1',
     email: 'alex@example.test',
     displayName: 'Alex Morgan',
+    emailVerified: true,
+    getIdTokenResult: async () => ({ claims: { admin: Boolean(window.__isAdmin) } }),
   };
   await authListener(auth.currentUser);
   return { user: auth.currentUser };
@@ -133,6 +174,22 @@ export const signOut = async () => {
   await authListener(null);
 };
 export const updateProfile = async (u, d) => Object.assign(u, d);
+export class GoogleAuthProvider {
+  setCustomParameters() {}
+}
+export const signInWithPopup = async () => {
+  window.__authActions?.push('google-sign-in');
+  return signInWithEmailAndPassword();
+};
+export const signInWithRedirect = async () => {};
+export const getRedirectResult = async () => null;
+export const sendPasswordResetEmail = async () => {
+  window.__authActions?.push('password-reset');
+};
+export const sendEmailVerification = async () => {
+  window.__authActions?.push('email-verification');
+};
+export const linkWithCredential = async () => ({ user: auth.currentUser });
 export const getAllDocuments = async (c) => data[c] || [];
 export const getDocument = async (c, id) =>
   (data[c] || []).find((d) => d.id === id) || null;

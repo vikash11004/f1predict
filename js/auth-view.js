@@ -28,6 +28,9 @@ export function renderAuthShell(ready = false) {
                 <button type="submit" class="btn btn-primary auth-submit" id="auth-submit"><span>Enter the paddock</span>${icon('arrow')}</button>
               </fieldset>
             </form>
+            <button type="button" class="auth-reset-link" id="auth-reset">Forgot your password?</button>
+            <div class="auth-divider"><span>OR CONTINUE WITH</span></div>
+            <button type="button" class="btn btn-secondary google-auth-btn" id="google-auth" ${ready ? '' : 'disabled'}><span class="google-mark" aria-hidden="true">G</span><span>Continue with Google</span></button>
             <p class="auth-switch"><span id="auth-switch-label">New to the grid?</span> <button id="auth-toggle" type="button" ${ready ? '' : 'disabled'}>Create an account ${icon('arrow', 'diagonal-arrow')}</button></p>
             <div class="connection-state ${ready ? 'hidden' : ''}" id="connection-state" role="status"><span class="status-dot"></span> Connecting to the paddock…</div>
             <div class="auth-footnote">${icon('trophy')} A little knowledge. A little instinct. All to play for.</div>
